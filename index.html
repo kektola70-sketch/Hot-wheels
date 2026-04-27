@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Hot Wheels 3D</title>
+    <style>
+        body { margin: 0; overflow: hidden; background: #1a1a1a; font-family: 'Arial', sans-serif; }
+        
+        /* Меню */
+        #menu {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.8); display: flex; flex-direction: column;
+            align-items: center; justify-content: center; z-index: 10;
+        }
+        #menu h1 { color: #ff4400; font-size: 3rem; text-shadow: 2px 2px #fff; margin-bottom: 20px; }
+        #start-btn { 
+            padding: 15px 40px; font-size: 1.5rem; background: #ff4400; color: white; 
+            border: none; border-radius: 5px; cursor: pointer; font-weight: bold;
+        }
+
+        /* Управление */
+        #ui { position: absolute; bottom: 30px; width: 100%; display: none; justify-content: space-around; pointer-events: none; z-index: 5; }
+        .btn { 
+            width: 90px; height: 90px; background: rgba(255,255,255,0.2); 
+            border: 3px solid #fff; border-radius: 50%; color: white; 
+            display: flex; align-items: center; justify-content: center; 
+            font-weight: bold; pointer-events: auto; user-select: none;
+            -webkit-user-select: none;
+        }
+        .btn:active { background: #ff4400; }
+    </style>
+</head>
+<body>
+
+<div id="menu">
+    <h1>HOT WHEELS</h1>
+    <button id="start-btn">ИГРАТЬ</button>
+</div>
+
+<div id="ui">
+    <div class="btn" id="brake">НАЗАД</div>
+    <div class="btn" id="gas">ГАЗ</div>
+</div>
+
+<script type="module">
+    import * as THREE from 'https://cdn.skypack.dev/three@0.132.2';
+    import * as CANNON from 'https://cdn.skypack.dev/cannon-es';
+    import { GLTFLoader } from 'https://cdn.skypack.dev/three@0.132.2/examples/jsm/loaders/GLTFLoader.js';
+
+    let gameStarted = false;
+
+    // --- СЦЕНА ---
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x87CEEB);
+    const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.shadowMap.enabled = true;
+    document.body.appendChild(renderer.domElement);
+
+    const light = new THREE.DirectionalLight(0xffffff, 1.2);
+    light.position.set(10, 50, 10);
+    light.castShadow = true;
+    scene.add(light);
+    scene.add(new THREE.AmbientLight(0xffffff, 0.5));
+
+    // --- ФИЗИКА ---
+    const world = new CANNON.World();
+    world.gravity.set(0, -15, 0); // Гравитация чуть сильнее для аркадности
+
+    // --- ТРАССА ---
+    function createTrack() {
+        // Главное полотно
+        const trackWidth = 8;
+        const trackLength = 1000;
+        
+        const groundBody = new CANNON.Body({
+            mass: 0,
+            shape: new CANNON.Box(new CANNON.Vec3(trackLength/2, 0.5, trackWidth/2)),
+            position: new CANNON.Vec3(trackLength/2 - 10, -0.5, 0)
+        });
+        world.addBody(groundBody);
+
+        const trackGeo = new THREE.BoxGeometry(trackLength, 1, trackWidth);
+        const trackMat = new THREE.MeshPhongMaterial({ color: 0xff4400 });
+        const trackMesh = new THREE.Mesh(trackGeo, trackMat);
+        trackMesh.position.copy(groundBody.position);
+        trackMesh.receiveShadow = true;
+        scene.add(trackMesh);
+
+        // Бортики
+        const wallGeo = new THREE.BoxGeometry(trackLength, 1.5, 0.5);
+        const wallMat = new THREE.MeshPhongMaterial({ color: 0x111111 });
+        
+        const leftWall = new THREE.Mesh(wallGeo, wallMat);
+        leftWall.position.set(trackLength/2 - 10, 0.5, trackWidth/2);
+        scene.add(leftWall);
+
+        const rightWall = new THREE.Mesh(wallGeo, wallMat);
+        rightWall.position.set(trackLength/2 - 10, 0.5, -trackWidth/2);
+        scene.add(rightWall);
+    }
+    createTrack();
+
+    // --- МАШИНА (Raycast Vehicle) ---
+    let carModel;
+    const chassisShape = new CANNON.Box(new CANNON.Vec3(1.2, 0.4, 0.6));
+    const chassisBody = new CANNON.Body({ mass: 200 });
+    chassisBody.addShape(chassisShape);
+    // ФИКС СПАВНА: ставим машину в координаты (0, 5, 0)
+    chassisBody.position.set(0, 5, 0);
+    chassisBody.angularDamping = 0.5;
+
+    const vehicle = new CANNON.RaycastVehicle({
+        chassisBody: chassisBody,
+        indexRightAxis: 2, indexUpAxis: 1, indexForwardAxis: 0
+    });
+
+    const wheelOptions = {
+        radius: 0.4,
+        directionLocal: new CANNON.Vec3(0, -1, 0),
+        suspensionStiffness: 40,
+        suspensionRestLength: 0.4,
+        frictionSlip: 3,
+        dampingRelaxation: 2.3,
+        dampingCompression: 4.4,
+        maxSuspensionForce: 100000,
+        axleLocal: new CANNON.Vec3(0, 0, 1),
+        chassisConnectionPointLocal: new CANNON.Vec3(1, 1, 0),
+        maxSuspensionTravel: 0.3
+    };
+
+    const wheelPositions = [
+        new CANNON.Vec3(1, 0, 0.7), new CANNON.Vec3(1, 0, -0.7),
+        new CANNON.Vec3(-1, 0, 0.7), new CANNON.Vec3(-1, 0, -0.7)
+    ];
+
+    wheelPositions.forEach(pos => {
+        wheelOptions.chassisConnectionPointLocal.copy(pos);
+        vehicle.addWheel(wheelOptions);
+    });
+    vehicle.addToWorld(world);
+
+    // Визуальные колеса
+    const wheelMeshes = [];
+    const wGeo = new THREE.CylinderGeometry(0.4, 0.4, 0.3, 20);
+    wGeo.rotateX(Math.PI/2);
+    const wMat = new THREE.MeshPhongMaterial({color: 0x222222});
+    for(let i=0; i<4; i++) {
+        const m = new THREE.Mesh(wGeo, wMat);
+        scene.add(m);
+        wheelMeshes.push(m);
+    }
+
+    // ЗАГРУЗКА МОДЕЛИ МАШИНЫ
+    const loader = new GLTFLoader();
+    // Используем временную модель спортивной машины
+    loader.load('https://raw.githubusercontent.com/mrdoob/three.js/master/examples/models/gltf/Ferrari.glb', (gltf) => {
+        carModel = gltf.scene;
+        carModel.scale.set(0.8, 0.8, 0.8);
+        scene.add(carModel);
+        // Скрываем стандартный куб, если бы он был
+    }, undefined, (err) => {
+        console.error("Ошибка загрузки модели, используем куб");
+        const boxGeo = new THREE.BoxGeometry(2.4, 0.8, 1.2);
+        const boxMat = new THREE.MeshPhongMaterial({color: 0xff0000});
+        carModel = new THREE.Mesh(boxGeo, boxMat);
+        scene.add(carModel);
+    });
+
+    // --- УПРАВЛЕНИЕ ---
+    let engineForce = 0;
+    let airControl = 0;
+
+    const gasBtn = document.getElementById('gas');
+    const brakeBtn = document.getElementById('brake');
+
+    gasBtn.ontouchstart = () => { engineForce = -2000; airControl = 5; };
+    gasBtn.ontouchend = () => { engineForce = 0; airControl = 0; };
+    brakeBtn.ontouchstart = () => { engineForce = 1000; airControl = -5; };
+    brakeBtn.ontouchend = () => { engineForce = 0; airControl = 0; };
+
+    // --- СТАРТ ИГРЫ ---
+    document.getElementById('start-btn').onclick = () => {
+        document.getElementById('menu').style.display = 'none';
+        document.getElementById('ui').style.display = 'flex';
+        gameStarted = true;
+    };
+
+    // --- ЦИКЛ ---
+    function animate() {
+        requestAnimationFrame(animate);
+        if(!gameStarted) return;
+
+        world.step(1/60);
+
+        // Обновление модели машины
+        if(carModel) {
+            carModel.position.copy(chassisBody.position);
+            // Корректировка поворота модели под физику
+            carModel.quaternion.copy(chassisBody.quaternion);
+        }
+
+        // Обновление колес
+        for (let i = 0; i < vehicle.wheelInfos.length; i++) {
+            vehicle.updateWheelTransform(i);
+            const t = vehicle.wheelInfos[i].worldTransform;
+            wheelMeshes[i].position.copy(t.position);
+            wheelMeshes[i].quaternion.copy(t.quaternion);
+        }
+
+        vehicle.applyEngineForce(engineForce, 2);
+        vehicle.applyEngineForce(engineForce, 3);
+
+        // Управление в воздухе (чтобы не падать носом)
+        const isTouching = vehicle.wheelInfos.some(w => w.raycastResult.hasHit);
+        if(!isTouching) {
+            chassisBody.angularVelocity.z += airControl * 0.1;
+        }
+
+        // Камера
+        camera.position.set(chassisBody.position.x, chassisBody.position.y + 4, 12);
+        camera.lookAt(chassisBody.position.x + 5, chassisBody.position.y, 0);
+
+        renderer.render(scene, camera);
+    }
+    animate();
+
+    window.addEventListener('resize', () => {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+</script>
+</body>
+</html>
